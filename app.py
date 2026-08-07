@@ -14,6 +14,7 @@ from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
 from lakebase import get_connection
+from scripts.ingest_weather_embeddings import run_ingest
 from weather_client import fetch_location_documents
 
 app = Flask(__name__)
@@ -90,6 +91,18 @@ def weather_sync():
         conn.commit()
 
     return jsonify({"synced": len(rows)}), 200
+
+
+@app.route("/weather/embed", methods=["POST"])
+def weather_embed():
+    """Embed any documents that don't have embeddings yet.
+
+    Same logic as `python scripts/ingest_weather_embeddings.py`, exposed as an
+    endpoint because Databricks Apps runs only the Flask server (no shell to
+    invoke the script). Reuses the already-loaded module-level model.
+    """
+    stats = run_ingest(model=_model)
+    return jsonify(stats), 200
 
 
 @app.route("/weather/search", methods=["POST"])

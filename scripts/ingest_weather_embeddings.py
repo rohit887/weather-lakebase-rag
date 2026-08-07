@@ -4,7 +4,11 @@ Standalone batch job. Uses the same get_connection() as the Flask app and
 psycopg2 only -- Spark JDBC writes are NOT supported against this Lakebase
 instance.
 
-Run order: schema.sql -> POST /weather/sync -> this script -> POST /weather/search
+Run order: schema.sql -> POST /weather/sync -> (this) -> POST /weather/search
+
+The core logic lives in run_ingest() so it can be triggered two ways:
+  - Locally / as a batch job:  python scripts/ingest_weather_embeddings.py
+  - Inside the deployed app:    POST /weather/embed  (app.py imports run_ingest)
 """
 
 import sys
@@ -44,8 +48,15 @@ def chunk_text(text):
     return chunks
 
 
-def main():
-    model = SentenceTransformer(MODEL_NAME)
+def run_ingest(model=None):
+    """Embed every document that has no rows in weather_embeddings yet.
+
+    Pass an already-loaded model to reuse it (the Flask app does this so it
+    doesn't load a second copy); otherwise one is loaded here.
+    Returns {"documents_processed": int, "chunks_inserted": int}.
+    """
+    if model is None:
+        model = SentenceTransformer(MODEL_NAME)
 
     select_sql = """
         SELECT d.id, d.narrative_text
@@ -61,13 +72,13 @@ def main():
         ON CONFLICT (document_id, chunk_index) DO NOTHING;
     """
 
+    docs_processed = 0
+    chunks_inserted = 0
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(select_sql)
             documents = cur.fetchall()
-
-        docs_processed = 0
-        chunks_inserted = 0
 
         for doc in documents:
             document_id = doc["id"]
@@ -101,8 +112,13 @@ def main():
 
         conn.commit()
 
-    print(f"Documents processed: {docs_processed}")
-    print(f"Chunks inserted:     {chunks_inserted}")
+    return {"documents_processed": docs_processed, "chunks_inserted": chunks_inserted}
+
+
+def main():
+    stats = run_ingest()
+    print(f"Documents processed: {stats['documents_processed']}")
+    print(f"Chunks inserted:     {stats['chunks_inserted']}")
 
 
 if __name__ == "__main__":
