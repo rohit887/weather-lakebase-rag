@@ -160,6 +160,165 @@ def weather_search():
     return jsonify({"results": results}), 200
 
 
+@app.route("/", methods=["GET"])
+def index():
+    """Interactive web interface for the Weather RAG API."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Weather RAG Search</title>
+        <style>
+            body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; background: #f5f5f5; }
+            h1 { color: #FF3621; }
+            .card { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .form-group { margin: 15px 0; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; }
+            input, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+            button { background: #FF3621; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+            button:hover { background: #E02E1A; }
+            .result { margin-top: 15px; padding: 15px; background: #f9f9f9; border-left: 4px solid #FF3621; border-radius: 4px; }
+            .success { border-left-color: #4CAF50; }
+            .error { border-left-color: #f44336; }
+            .loading { color: #666; font-style: italic; }
+            .match { margin: 10px 0; padding: 10px; background: white; border-radius: 4px; }
+            .similarity { color: #FF3621; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>🌤️ Weather RAG Search API</h1>
+        <p>Retrieval-augmented search over NWS weather data on Lakebase</p>
+        
+        <div class="card">
+            <h2>📊 System Health</h2>
+            <button onclick="checkHealth()">Check Database Status</button>
+            <div id="health-result"></div>
+        </div>
+        
+        <div class="card">
+            <h2>🔄 Sync Weather Data</h2>
+            <div class="form-group">
+                <label>Locations (comma-separated, e.g., "Seattle,WA", "Portland,OR"):</label>
+                <input type="text" id="sync-locations" placeholder="Seattle,WA, Portland,OR" value="Seattle,WA">
+            </div>
+            <div class="form-group">
+                <label>Limit (max documents):</label>
+                <input type="number" id="sync-limit" value="50" min="1">
+            </div>
+            <button onclick="syncWeather()">Sync Weather Data</button>
+            <div id="sync-result"></div>
+        </div>
+        
+        <div class="card">
+            <h2>🔍 Search Weather Data</h2>
+            <div class="form-group">
+                <label>Search Query:</label>
+                <input type="text" id="search-query" placeholder="What's the weather forecast for Seattle?">
+            </div>
+            <div class="form-group">
+                <label>Top Results:</label>
+                <input type="number" id="search-top-k" value="5" min="1" max="20">
+            </div>
+            <button onclick="searchWeather()">Search</button>
+            <div id="search-result"></div>
+        </div>
+        
+        <script>
+            async function checkHealth() {
+                const resultDiv = document.getElementById('health-result');
+                resultDiv.innerHTML = '<div class="result loading">Checking database status...</div>';
+                try {
+                    const response = await fetch('/health');
+                    const data = await response.json();
+                    resultDiv.innerHTML = `
+                        <div class="result success">
+                            <strong>Database Status:</strong><br>
+                            Weather Documents: ${data.weather_documents}<br>
+                            Weather Embeddings: ${data.weather_embeddings}
+                        </div>
+                    `;
+                } catch (error) {
+                    resultDiv.innerHTML = `<div class="result error">Error: ${error.message}</div>`;
+                }
+            }
+            
+            async function syncWeather() {
+                const resultDiv = document.getElementById('sync-result');
+                const locations = document.getElementById('sync-locations').value.split(',').map(s => s.trim()).filter(s => s);
+                const limit = parseInt(document.getElementById('sync-limit').value);
+                
+                if (locations.length === 0) {
+                    resultDiv.innerHTML = '<div class="result error">Please enter at least one location</div>';
+                    return;
+                }
+                
+                resultDiv.innerHTML = '<div class="result loading">Syncing weather data...</div>';
+                try {
+                    const response = await fetch('/weather/sync', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ locations, limit })
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        resultDiv.innerHTML = `<div class="result success">Successfully synced ${data.synced} documents!</div>`;
+                    } else {
+                        resultDiv.innerHTML = `<div class="result error">Error: ${data.error || 'Unknown error'}</div>`;
+                    }
+                } catch (error) {
+                    resultDiv.innerHTML = `<div class="result error">Error: ${error.message}</div>`;
+                }
+            }
+            
+            async function searchWeather() {
+                const resultDiv = document.getElementById('search-result');
+                const query = document.getElementById('search-query').value.trim();
+                const top_k = parseInt(document.getElementById('search-top-k').value);
+                
+                if (!query) {
+                    resultDiv.innerHTML = '<div class="result error">Please enter a search query</div>';
+                    return;
+                }
+                
+                resultDiv.innerHTML = '<div class="result loading">Searching weather data...</div>';
+                try {
+                    const response = await fetch('/weather/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query, top_k })
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        if (data.results.length === 0) {
+                            resultDiv.innerHTML = '<div class="result">No results found</div>';
+                        } else {
+                            let html = '<div class="result success"><strong>Search Results:</strong></div>';
+                            data.results.forEach((match, i) => {
+                                html += `
+                                    <div class="match">
+                                        <strong>${i + 1}. ${match.location}</strong> 
+                                        <span class="similarity">(${(match.similarity * 100).toFixed(1)}% match)</span><br>
+                                        <em>${match.headline}</em><br>
+                                        ${match.chunk_text}
+                                    </div>
+                                `;
+                            });
+                            resultDiv.innerHTML = html;
+                        }
+                    } else {
+                        resultDiv.innerHTML = `<div class="result error">Error: ${data.error || 'Unknown error'}</div>`;
+                    }
+                } catch (error) {
+                    resultDiv.innerHTML = `<div class="result error">Error: ${error.message}</div>`;
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return html, 200
+
+
 @app.route("/health", methods=["GET"])
 def health():
     with get_connection() as conn:
