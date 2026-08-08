@@ -208,7 +208,14 @@ def index():
             <button onclick="syncWeather()">Sync Weather Data</button>
             <div id="sync-result"></div>
         </div>
-        
+
+        <div class="card">
+            <h2>🧠 Embed Documents</h2>
+            <p>Turn synced documents into vectors. Run this after syncing and before searching.</p>
+            <button onclick="embedWeather()">Embed Documents</button>
+            <div id="embed-result"></div>
+        </div>
+
         <div class="card">
             <h2>🔍 Search Weather Data</h2>
             <div class="form-group">
@@ -270,6 +277,25 @@ def index():
                 }
             }
             
+            async function embedWeather() {
+                const resultDiv = document.getElementById('embed-result');
+                resultDiv.innerHTML = '<div class="result loading">Embedding documents (first run downloads the model, this can take a minute)...</div>';
+                try {
+                    const response = await fetch('/weather/embed', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        resultDiv.innerHTML = `<div class="result success">Embedded ${data.documents_processed} documents into ${data.chunks_inserted} chunks!</div>`;
+                    } else {
+                        resultDiv.innerHTML = `<div class="result error">Error: ${data.error || 'Unknown error'}</div>`;
+                    }
+                } catch (error) {
+                    resultDiv.innerHTML = `<div class="result error">Error: ${error.message}</div>`;
+                }
+            }
+
             async function searchWeather() {
                 const resultDiv = document.getElementById('search-result');
                 const query = document.getElementById('search-query').value.trim();
