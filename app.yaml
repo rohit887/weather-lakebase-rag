@@ -1,6 +1,17 @@
 command: ["python", "app.py"]
 
-# Database connection is handled automatically by the postgres database resource.
-# The app's database resource injects DATABRICKS_POSTGRES_* environment variables
-# with host, database, user, port, and password (OAuth token).
-# No manual configuration needed here!
+env:
+  # Connection to Lakebase Postgres using student-weather role
+  - name: PGHOST
+    value: "ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
+  - name: PGDATABASE
+    value: "databricks_postgres"
+  - name: PGUSER
+    value: "student-weather"
+  - name: PGPORT
+    value: "5432"
+  - name: PGSSLMODE
+    value: "require"
+  # Password embedded directly (for development)
+  - name: PGPASSWORD
+    value: "npg_Z5h6GpsEIkQP"
