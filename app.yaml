@@ -1,5 +1,12 @@
 command: ["python", "app.py"]
 
+# Secret resource: references Databricks secret scope + key
+secrets:
+  - name: "pg-password"
+    valueFrom:
+      secretScope: "weather-rag"
+      secretKey: "pg-password"
+
 env:
   # Connection to Lakebase Postgres using student-weather role
   - name: PGHOST
@@ -12,6 +19,7 @@ env:
     value: "5432"
   - name: PGSSLMODE
     value: "require"
-  # Password embedded directly (for development)
+  # Password from Databricks secret (secure, production-ready)
+  # The app service principal has READ access to the weather-rag scope
   - name: PGPASSWORD
-    value: "npg_Z5h6GpsEIkQP"
+    valueFrom: "pg-password"
