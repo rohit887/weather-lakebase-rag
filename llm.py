@@ -13,7 +13,7 @@ import os
 
 # Set this to a chat/completions serving endpoint that exists in YOUR workspace
 # (e.g. a Databricks-hosted Claude or Llama endpoint).
-DEFAULT_ENDPOINT = "databricks-claude-3-7-sonnet"
+DEFAULT_ENDPOINT = "databricks-llama-4-maverick"
 
 _client = None
 
