@@ -14,7 +14,6 @@ from contextlib import contextmanager
 import psycopg2
 from databricks.sdk import WorkspaceClient
 from psycopg2.extras import RealDictCursor
-from sqlalchemy import create_engine
 
 _w = WorkspaceClient()
 
@@ -36,11 +35,6 @@ def get_connection():
         yield conn
     finally:
         conn.close()
-
-
-def get_engine():
-    """Return a SQLAlchemy engine for Lakebase."""
-    return create_engine(_lakebase_url())
 
 
 def run_query(sql: str, params: tuple | dict | None = None) -> list[dict]:
