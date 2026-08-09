@@ -9,22 +9,25 @@ Steps that must happen in the Databricks UI or SQL editor are marked **(UI)** /
 
 ---
 
-## Authentication: native password role
+## Authentication: single connection-URL secret
 
 This app authenticates to Postgres with a **native role + password**
-(`student-weather`), not OAuth token minting. `lakebase.py` uses `PGPASSWORD`
-if it's set and only falls back to minting an OAuth token when it isn't — so
-the Databricks SDK/auth is not needed on the password path.
-
-Connection values (already filled into [`app.yaml`](./app.yaml)):
+(`student-weather`), passed as a full connection URL that lives in **one
+Databricks secret**. `lakebase.py` fetches it at runtime via the SDK
+(`WorkspaceClient().secrets.get_secret`) and base64-decodes it once, then hands
+the whole URL to psycopg2. `app.yaml` only carries the secret's location:
 
 | Var | Value |
 |-----|-------|
-| `PGHOST` | `ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com` |
-| `PGDATABASE` | `databricks_postgres` |
-| `PGUSER` | `student-weather` |
-| `PGPORT` | `5432` / `PGSSLMODE` `require` |
-| `PGPASSWORD` | **from a secret** — never inline |
+| `LAKEBASE_SECRET_SCOPE` | `database` |
+| `LAKEBASE_SECRET_KEY` | `lakebase-url` |
+
+The secret holds a URL like:
+`postgresql://student-weather:<password>@ep-...cloud.databricks.com:5432/databricks_postgres?sslmode=require`
+
+Why fetch in code instead of an `app.yaml` `secrets:`/`valueFrom` resource? The
+`valueFrom` path needs fiddly per-service-principal ACLs; reading via the SDK +
+granting the secret scope to the **`users`** group is simpler and more reliable.
 
 ---
 
@@ -54,28 +57,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON weather_embeddings TO "student-weather";
 GRANT USAGE, SELECT ON SEQUENCE weather_embeddings_id_seq  TO "student-weather";
 ```
 
-*(Verified working — a local run inserted 60 documents / 62 embeddings.)*
+*(Verified working — a run inserted 93 documents / 99 embeddings.)*
 
-## 3. Store the password as a Databricks secret
+## 3. Store the connection URL as a Databricks secret
 
-The `PGPASSWORD` value in `app.yaml` is `valueFrom: "pg-password"`, which
-resolves to a **secret resource** on the app. Create the secret, then bind it
-to the app as a resource named `pg-password` (Apps UI → Edit → Resources →
-Secret → scope `weather`, key `pg-password`):
+Store the **plain** URL — Databricks base64-encodes it at rest, and
+`lakebase.py` decodes it once (do **not** pre-encode it yourself, or you get
+double-encoding). Then grant READ to the `users` group so the app's service
+principal can read it:
 
 ```bash
-databricks secrets create-scope weather
-databricks secrets put-secret weather pg-password   # paste the role password
+databricks secrets create-scope database
+databricks secrets put-secret database lakebase-url \
+  --string-value 'postgresql://student-weather:<password>@ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com:5432/databricks_postgres?sslmode=require'
+databricks secrets put-acl database users READ
 ```
 
-> Never commit the password. It lives only in the secret scope (deployed) or
-> your shell env (local).
+> Never commit the URL/password. It lives only in the secret scope.
 
 ## 4. Deploy
 
 Create the app (Apps UI → Create app → Flask template, name
-`weather-lakebase-rag`), attach the `pg-password` secret resource from step 3,
-then:
+`weather-lakebase-rag`), then:
 
 ```bash
 # Sync this repo into your workspace
@@ -121,15 +124,16 @@ curl -sX POST $APP/weather/search \
 
 ## Optional: RAG summary + scheduled sync
 
-- **LLM summary (`GET /weather/search`).** Set `LLM_ENDPOINT_NAME` in `app.yaml`
-  to a chat serving endpoint in your workspace (default
-  `databricks-claude-3-7-sonnet`). No API key — the deployed app's service
-  principal authenticates to the endpoint. Locally it needs `databricks auth
-  login`; without it, search still works and `summary` is `null`.
+- **LLM summary (`GET /weather/search`).** `llm.py`'s `DEFAULT_ENDPOINT` is
+  `databricks-llama-4-maverick`; override with `LLM_ENDPOINT_NAME` if needed. No
+  API key — the deployed app's service principal authenticates to the endpoint.
+  Locally it needs `databricks auth login`; without it, search still works and
+  `summary` is `null`.
 - **Scheduled re-sync.** Create a **Databricks Job** with a Python-script task
   pointing at `scripts/scheduled_sync.py`, a cron schedule (quartz, e.g.
-  `0 0/15 * * * ?` for every 15 min), and the `PG*` + `PGPASSWORD` (from the
-  secret) set as job env vars. Optionally set `SYNC_LOCATIONS` /`SYNC_LIMIT`.
+  `0 0/15 * * * ?` for every 15 min). The job's identity needs READ on the
+  `database` secret scope (granted to the `users` group in step 3). Optionally
+  set `SYNC_LOCATIONS` / `SYNC_LIMIT`.
 
 ## Notes
 
@@ -142,14 +146,13 @@ curl -sX POST $APP/weather/search \
   `all-MiniLM-L6-v2` weights on first model use.
 - **Re-running is safe.** Sync upserts on `id`; embed skips documents that
   already have rows (`WHERE e.id IS NULL` + `ON CONFLICT DO NOTHING`).
-- **Local run alternative (no Databricks auth needed).** With the password
-  method you can populate the tables straight from your laptop:
+- **Local / notebook runs.** `lakebase.py` reads the connection URL from the
+  secret via the SDK, so any local run needs workspace auth first:
   ```bash
   pip install -r requirements.txt
-  export PGHOST="ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
-  export PGDATABASE="databricks_postgres" PGUSER="student-weather" PGPORT="5432"
-  export PGPASSWORD="<the role password>"    # do NOT hard-code in a file
+  databricks auth login --host https://<your-workspace>.cloud.databricks.com
   python scripts/ingest_weather_embeddings.py   # embed step
   ```
-  (The sync + search steps run the same way via the endpoints, or Flask's
-  `app.test_client()`.)
+  In a Databricks notebook auth is automatic — see
+  `notebooks/rag_summary_demo.py`. (The `database`/`lakebase-url` secret must be
+  readable by your identity.)

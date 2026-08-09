@@ -42,24 +42,18 @@ print(resp.choices[0].message.content)
 # MAGIC %md
 # MAGIC ## Option B — full RAG over your Lakebase data
 # MAGIC
-# MAGIC Set the connection env vars. Put the password in a secret (or type it into
-# MAGIC the widget below) — never hard-code it in the notebook.
+# MAGIC No connection config needed here. `lakebase.py` reads the whole connection
+# MAGIC URL from a Databricks secret (`WorkspaceClient().secrets.get_secret`), which
+# MAGIC authenticates automatically in a notebook. It defaults to scope `database`,
+# MAGIC key `lakebase-url`; override via the env vars below only if yours differ.
 
 # COMMAND ----------
 
 import os
 
-os.environ["PGHOST"] = "ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
-os.environ["PGDATABASE"] = "databricks_postgres"
-os.environ["PGUSER"] = "student-weather"
-os.environ["PGPORT"] = "5432"
-
-# Password: prefer a secret scope; fall back to a widget you type into.
-try:
-    os.environ["PGPASSWORD"] = dbutils.secrets.get(scope="weather", key="pg-password")
-except Exception:
-    dbutils.widgets.text("pg_password", "")
-    os.environ["PGPASSWORD"] = dbutils.widgets.get("pg_password")
+# Optional -- only needed if your secret scope/key differ from the defaults.
+os.environ["LAKEBASE_SECRET_SCOPE"] = "database"
+os.environ["LAKEBASE_SECRET_KEY"] = "lakebase-url"
 
 # COMMAND ----------
 

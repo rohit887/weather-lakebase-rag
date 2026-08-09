@@ -81,22 +81,26 @@ deploy landed.
 
 ### Configuration before deploy
 
-- `app.yaml` — set `ENDPOINT_NAME` to your Lakebase endpoint resource name.
 - `weather_client.py` — set `CONTACT_EMAIL` (NWS returns **403** without a real
   contact email in the `User-Agent`).
-- Set `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPORT` in `app.yaml`, and inject
-  `PGPASSWORD` from a Databricks secret (`valueFrom`). See `DEPLOY.md`.
+- Store the Lakebase connection URL in a Databricks secret and point `app.yaml`
+  at it via `LAKEBASE_SECRET_SCOPE` / `LAKEBASE_SECRET_KEY`. See `DEPLOY.md`.
 
 ## How the connection works (and why)
 
-`lakebase.py` builds a fresh psycopg2 connection per use with `sslmode=require`
-(TLS is mandatory on Lakebase). Authentication uses a **native Postgres role +
-password**: `_resolve_password()` returns `PGPASSWORD` when it's set. If it
-isn't, it falls back to minting a short-lived OAuth token via
-`WorkspaceClient().postgres.generate_database_credential(...)`. The Databricks
-SDK is imported lazily so the password path needs no Databricks auth. The
-password itself lives only in a Databricks secret (deployed) or the shell env
-(local) — never in source.
+`lakebase.py` reads a **single Postgres connection URL from a Databricks
+secret** — `WorkspaceClient().secrets.get_secret(scope, key)`, base64-decoded
+once — and hands the whole URL to psycopg2 (the URL carries the native
+`student-weather` role, its password, and `sslmode=require`). Auth comes from
+the app's service principal when deployed (or `databricks auth login` locally),
+and the secret scope is granted READ to the `users` group.
+
+Why one URL secret fetched in code, instead of five `PG*` env vars or an
+`app.yaml` `valueFrom` secret? The `valueFrom` path needs brittle
+per-service-principal ACLs; a single URL read via the SDK keeps setup to one
+secret and one `users`-group grant. Store the URL **plain** — Databricks
+encodes it at rest and the code decodes once (pre-encoding causes the classic
+double-base64 bug).
 
 ## Stretch goals implemented
 
@@ -137,7 +141,7 @@ password itself lives only in a Databricks secret (deployed) or the shell env
   ranked well but not guaranteed to be the exact top-k.
 - **No auth on the endpoints.** This is a learning example; the Flask routes
   have no authentication or rate limiting of their own.
-- **No connection pooling.** A new connection (and OAuth token) is created per
+- **No connection pooling.** A new connection (and a secret fetch) happens per
   request for clarity over throughput.
 - **Sync `limit` is a coarse cap** across all requested locations combined, not
   a per-location limit.

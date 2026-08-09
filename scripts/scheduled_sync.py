@@ -6,18 +6,21 @@ pipeline.sync_documents() and run_ingest() as the Flask app, so scheduled runs
 and manual runs behave identically. Upserts are idempotent (ON CONFLICT), so
 re-running every N minutes just refreshes changed alerts.
 
-Config via environment (plus the usual PG* connection vars):
-  SYNC_LOCATIONS  ';'-separated "City, ST" list
-                  (default: "Chicago, IL;Austin, TX;Miami, FL;Denver, CO")
-  SYNC_LIMIT      max documents per run (default: 50)
+The database connection comes from lakebase.get_connection(), which reads the
+LAKEBASE_URL secret via the Databricks SDK -- so this must run in a context with
+workspace auth (a Databricks Job, or locally after `databricks auth login`).
+
+Config via environment:
+  SYNC_LOCATIONS        ';'-separated "City, ST" list
+                        (default: "Chicago, IL;Austin, TX;Miami, FL;Denver, CO")
+  SYNC_LIMIT            max documents per run (default: 50)
+  LAKEBASE_SECRET_SCOPE / LAKEBASE_SECRET_KEY  override the secret location
+                        (defaults: scope "database", key "lakebase-url")
 
 Databricks Job cron example (every 15 min):
   Task type: Python script -> scripts/scheduled_sync.py
   Schedule (quartz): 0 0/15 * * * ?
-  Set PG* + PGPASSWORD (from a secret) as job env vars.
-
-System crontab example (every 15 min):
-  */15 * * * * cd /path/to/app && /usr/bin/python3 scripts/scheduled_sync.py >> sync.log 2>&1
+  The job's identity needs READ on the secret scope (grant to the "users" group).
 """
 
 import os
