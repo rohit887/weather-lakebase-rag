@@ -119,6 +119,18 @@ curl -sX POST $APP/weather/search \
 
 ---
 
+## Optional: RAG summary + scheduled sync
+
+- **LLM summary (`GET /weather/search`).** Set `LLM_ENDPOINT_NAME` in `app.yaml`
+  to a chat serving endpoint in your workspace (default
+  `databricks-claude-3-7-sonnet`). No API key — the deployed app's service
+  principal authenticates to the endpoint. Locally it needs `databricks auth
+  login`; without it, search still works and `summary` is `null`.
+- **Scheduled re-sync.** Create a **Databricks Job** with a Python-script task
+  pointing at `scripts/scheduled_sync.py`, a cron schedule (quartz, e.g.
+  `0 0/15 * * * ?` for every 15 min), and the `PG*` + `PGPASSWORD` (from the
+  secret) set as job env vars. Optionally set `SYNC_LOCATIONS` /`SYNC_LIMIT`.
+
 ## Notes
 
 - **Why an `/weather/embed` endpoint?** Databricks Apps runs only the Flask

@@ -2,20 +2,20 @@
 
 Endpoints:
   POST /weather/sync   - fetch + upsert weather documents
+  POST /weather/embed  - embed unembedded documents
   POST /weather/search - semantic search over embedded chunks
+  GET  /weather/search - same search + an LLM natural-language summary (RAG)
   GET  /health         - row counts for both tables
 """
 
-import json
-import os
-
 from flask import Flask, jsonify, request
-from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
+import llm
+import pipeline
 from lakebase import get_connection
+from pipeline import VALID_SOURCE_TYPES
 from scripts.ingest_weather_embeddings import run_ingest
-from weather_client import fetch_location_documents
 
 app = Flask(__name__)
 
@@ -47,50 +47,8 @@ def weather_sync():
     if limit < 1:
         return jsonify({"error": "'limit' must be >= 1."}), 400
 
-    # Gather normalized records across all requested locations, capped at limit.
-    records = []
-    for location in locations:
-        if not isinstance(location, str):
-            continue
-        records.extend(fetch_location_documents(location))
-        if len(records) >= limit:
-            break
-    records = records[:limit]
-
-    if not records:
-        return jsonify({"synced": 0}), 200
-
-    upsert_sql = """
-        INSERT INTO weather_documents
-            (id, location, source_type, headline, narrative_text,
-             issued_at, payload, synced_at)
-        VALUES %s
-        ON CONFLICT (id) DO UPDATE
-            SET narrative_text = EXCLUDED.narrative_text,
-                payload        = EXCLUDED.payload,
-                synced_at      = now();
-    """
-
-    rows = [
-        (
-            r["id"],
-            r["location"],
-            r["source_type"],
-            r["headline"],
-            r["narrative_text"],
-            r["issued_at"],
-            Json(r["payload"]),
-            r["synced_at"],
-        )
-        for r in records
-    ]
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            execute_values(cur, upsert_sql, rows)
-        conn.commit()
-
-    return jsonify({"synced": len(rows)}), 200
+    synced = pipeline.sync_documents(locations, limit)
+    return jsonify({"synced": synced}), 200
 
 
 @app.route("/weather/embed", methods=["POST"])
@@ -105,59 +63,84 @@ def weather_embed():
     return jsonify(stats), 200
 
 
-@app.route("/weather/search", methods=["POST"])
-def weather_search():
-    body = request.get_json(silent=True) or {}
-    query = body.get("query")
-    top_k = body.get("top_k", 5)
-
+def _validate_search_params(query, top_k, source_type):
+    """Validate shared search params. Returns (clean_dict, None) or
+    (None, (error_json, status))."""
     if not isinstance(query, str) or not query.strip():
-        return jsonify({"error": "Provide a non-blank 'query'."}), 400
+        return None, ({"error": "Provide a non-blank 'query'."}, 400)
 
     try:
         top_k = int(top_k)
     except (TypeError, ValueError):
-        return jsonify({"error": "'top_k' must be an integer."}), 400
+        return None, ({"error": "'top_k' must be an integer."}, 400)
     if top_k < 1 or top_k > 20:
-        return jsonify({"error": "'top_k' must be between 1 and 20."}), 400
+        return None, ({"error": "'top_k' must be between 1 and 20."}, 400)
 
-    query_embedding = _embed(query.strip())
+    if source_type is not None and source_type not in VALID_SOURCE_TYPES:
+        return None, (
+            {"error": "'source_type' must be 'alert' or 'forecast'."},
+            400,
+        )
 
-    search_sql = """
-        SELECT d.id, d.location, d.headline, d.narrative_text, e.chunk_text,
-               1 - (e.embedding <=> %s::vector) AS similarity
-        FROM weather_embeddings e
-        JOIN weather_documents d ON d.id = e.document_id
-        ORDER BY e.embedding <=> %s::vector
-        LIMIT %s;
-    """
+    return {"query": query.strip(), "top_k": top_k, "source_type": source_type}, None
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) AS n FROM weather_embeddings;")
-            if cur.fetchone()["n"] == 0:
-                return (
-                    jsonify(
-                        {
-                            "error": "weather_embeddings is empty. Run the sync "
-                            "endpoint and the ingest script first."
-                        }
-                    ),
-                    409,
-                )
-            cur.execute(search_sql, (query_embedding, query_embedding, top_k))
-            matches = cur.fetchall()
 
-    results = [
-        {
-            "location": m["location"],
-            "headline": m["headline"],
-            "chunk_text": m["chunk_text"],
-            "similarity": float(m["similarity"]),
-        }
-        for m in matches
-    ]
+def _run_search(query, top_k, source_type):
+    """Embed the query and return (results, None) or (None, (error_json, status))."""
+    if pipeline.embedding_count() == 0:
+        return None, (
+            {
+                "error": "weather_embeddings is empty. Run /weather/sync then "
+                "/weather/embed first."
+            },
+            409,
+        )
+    query_embedding = _embed(query)
+    return pipeline.vector_search(query_embedding, top_k, source_type), None
+
+
+@app.route("/weather/search", methods=["POST"])
+def weather_search():
+    body = request.get_json(silent=True) or {}
+    clean, err = _validate_search_params(
+        body.get("query"), body.get("top_k", 5), body.get("source_type")
+    )
+    if err:
+        return jsonify(err[0]), err[1]
+
+    results, err = _run_search(**clean)
+    if err:
+        return jsonify(err[0]), err[1]
     return jsonify({"results": results}), 200
+
+
+@app.route("/weather/search", methods=["GET"])
+def weather_search_rag():
+    """Same vector search as POST, plus an LLM natural-language summary (RAG).
+
+    Query params: query (required), top_k (default 5), source_type (optional).
+    The summary degrades gracefully: if the model endpoint is unreachable, the
+    vector results still return with summary=null and a summary_error note.
+    """
+    clean, err = _validate_search_params(
+        request.args.get("query"),
+        request.args.get("top_k", 5),
+        request.args.get("source_type"),
+    )
+    if err:
+        return jsonify(err[0]), err[1]
+
+    results, err = _run_search(**clean)
+    if err:
+        return jsonify(err[0]), err[1]
+
+    summary, summary_error = llm.summarize(clean["query"], results)
+    return (
+        jsonify(
+            {"results": results, "summary": summary, "summary_error": summary_error}
+        ),
+        200,
+    )
 
 
 @app.route("/", methods=["GET"])
@@ -225,6 +208,17 @@ def index():
             <div class="form-group">
                 <label>Top Results:</label>
                 <input type="number" id="search-top-k" value="5" min="1" max="20">
+            </div>
+            <div class="form-group">
+                <label>Source type filter:</label>
+                <select id="search-source-type">
+                    <option value="">All</option>
+                    <option value="alert">Alerts only</option>
+                    <option value="forecast">Forecasts only</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="search-ai" style="width:auto"> AI summary (RAG)</label>
             </div>
             <button onclick="searchWeather()">Search</button>
             <div id="search-result"></div>
@@ -300,37 +294,56 @@ def index():
                 const resultDiv = document.getElementById('search-result');
                 const query = document.getElementById('search-query').value.trim();
                 const top_k = parseInt(document.getElementById('search-top-k').value);
-                
+                const sourceType = document.getElementById('search-source-type').value;
+                const useAi = document.getElementById('search-ai').checked;
+
                 if (!query) {
                     resultDiv.innerHTML = '<div class="result error">Please enter a search query</div>';
                     return;
                 }
-                
+
                 resultDiv.innerHTML = '<div class="result loading">Searching weather data...</div>';
                 try {
-                    const response = await fetch('/weather/search', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ query, top_k })
-                    });
+                    let response;
+                    if (useAi) {
+                        // RAG variant: GET /weather/search returns an LLM summary too.
+                        const params = new URLSearchParams({ query, top_k });
+                        if (sourceType) params.set('source_type', sourceType);
+                        response = await fetch('/weather/search?' + params.toString());
+                    } else {
+                        const payload = { query, top_k };
+                        if (sourceType) payload.source_type = sourceType;
+                        response = await fetch('/weather/search', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                    }
                     const data = await response.json();
                     if (response.ok) {
+                        let html = '';
+                        if (data.summary) {
+                            html += `<div class="result success"><strong>🤖 AI Summary:</strong><br>${data.summary}</div>`;
+                        } else if (useAi && data.summary_error) {
+                            html += `<div class="result error"><strong>AI summary unavailable:</strong> ${data.summary_error}</div>`;
+                        }
                         if (data.results.length === 0) {
-                            resultDiv.innerHTML = '<div class="result">No results found</div>';
+                            html += '<div class="result">No results found</div>';
                         } else {
-                            let html = '<div class="result success"><strong>Search Results:</strong></div>';
+                            html += '<div class="result success"><strong>Search Results:</strong></div>';
                             data.results.forEach((match, i) => {
                                 html += `
                                     <div class="match">
-                                        <strong>${i + 1}. ${match.location}</strong> 
-                                        <span class="similarity">(${(match.similarity * 100).toFixed(1)}% match)</span><br>
+                                        <strong>${i + 1}. ${match.location}</strong>
+                                        <span class="similarity">(${(match.similarity * 100).toFixed(1)}% match)</span>
+                                        <em>[${match.source_type}]</em><br>
                                         <em>${match.headline}</em><br>
                                         ${match.chunk_text}
                                     </div>
                                 `;
                             });
-                            resultDiv.innerHTML = html;
                         }
+                        resultDiv.innerHTML = html;
                     } else {
                         resultDiv.innerHTML = `<div class="result error">Error: ${data.error || 'Unknown error'}</div>`;
                     }

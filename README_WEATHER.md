@@ -84,20 +84,44 @@ deploy landed.
 - `app.yaml` — set `ENDPOINT_NAME` to your Lakebase endpoint resource name.
 - `weather_client.py` — set `CONTACT_EMAIL` (NWS returns **403** without a real
   contact email in the `User-Agent`).
-- Bind a Lakebase resource to the app. Databricks Apps injects `PGHOST`,
-  `PGDATABASE`, `PGUSER`, and `PGPORT` after the first deploy with the resource
-  bound. The database password is **not** injected — `lakebase.py` mints a
-  short-lived OAuth token per connection.
+- Set `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPORT` in `app.yaml`, and inject
+  `PGPASSWORD` from a Databricks secret (`valueFrom`). See `DEPLOY.md`.
 
 ## How the connection works (and why)
 
-`lakebase.py` builds a fresh psycopg2 connection per use. Databricks Apps
-injects the `PG*` variables, but **not** a password: instead the app calls
-`WorkspaceClient().postgres.generate_database_credential(...)` to mint a
-short-lived OAuth token. Those tokens expire after ~1 hour, so a token is
-generated **per connection** rather than cached at module scope (caching would
-pass tests and then fail silently an hour later). TLS (`sslmode=require`) is
-mandatory on Lakebase.
+`lakebase.py` builds a fresh psycopg2 connection per use with `sslmode=require`
+(TLS is mandatory on Lakebase). Authentication uses a **native Postgres role +
+password**: `_resolve_password()` returns `PGPASSWORD` when it's set. If it
+isn't, it falls back to minting a short-lived OAuth token via
+`WorkspaceClient().postgres.generate_database_credential(...)`. The Databricks
+SDK is imported lazily so the password path needs no Databricks auth. The
+password itself lives only in a Databricks secret (deployed) or the shell env
+(local) — never in source.
+
+## Stretch goals implemented
+
+- **Dedup/upsert on `id`.** `/weather/sync` upserts with
+  `ON CONFLICT (id) DO UPDATE`, so re-running never duplicates rows.
+- **Two sources + `source_type` filter.** We ingest both alerts and forecasts;
+  both search variants accept an optional `source_type` (`alert` | `forecast`)
+  that adds a parameterized `WHERE d.source_type = %s`.
+- **RAG summary.** `GET /weather/search?query=...&top_k=...&source_type=...`
+  runs the same vector search, then asks a **Databricks Foundation Model API**
+  serving endpoint (via the SDK — no separate key) to write a grounded
+  natural-language answer. Configure the endpoint with `LLM_ENDPOINT_NAME`
+  (default `databricks-claude-3-7-sonnet`). It degrades gracefully: if the
+  model is unreachable, results still return with `summary: null` and a
+  `summary_error` note.
+- **Scheduled re-sync.** `scripts/scheduled_sync.py` re-syncs + re-embeds on a
+  cron cadence (Databricks Job or system crontab). Locations via
+  `SYNC_LOCATIONS`, cap via `SYNC_LIMIT`.
+- **HNSW benchmark.** `scripts/benchmark_hnsw.py` compares query latency with
+  vs. without the index (`EXPLAIN ANALYZE`, index scans toggled via
+  `SET LOCAL enable_indexscan`). Measured results:
+  - Real table (62 rows): **0.88×** — at tiny N the planner's index overhead
+    isn't worth it, so "without" is marginally faster. Expected.
+  - Synthetic 20,000 rows (`--synthetic 20000`): **~4.5× faster** with HNSW
+    (≈6.6 ms vs ≈30 ms). The index pays off at scale.
 
 ## Known limitations
 
