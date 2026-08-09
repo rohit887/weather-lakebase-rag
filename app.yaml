@@ -1,18 +1,6 @@
 command: ["python", "app.py"]
 
-env:
-  # --- OAuth token auth (via Databricks SDK fallback) ---
-  # The lakebase.py connection will mint short-lived OAuth tokens automatically
-  # when PGPASSWORD is not set. This uses the app's database resource.
-  - name: ENDPOINT_NAME
-    value: "ep-round-butterfly-d8iwgyc5"
-  - name: PGHOST
-    value: "ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
-  - name: PGDATABASE
-    value: "databricks_postgres"
-  - name: PGUSER
-    value: "student-weather"
-  - name: PGPORT
-    value: "5432"
-  - name: PGSSLMODE
-    value: "require"
+# Database connection is handled automatically by the postgres database resource.
+# The app's database resource injects DATABRICKS_POSTGRES_* environment variables
+# with host, database, user, port, and password (OAuth token).
+# No manual configuration needed here!

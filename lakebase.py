@@ -39,25 +39,45 @@ def _generate_password() -> str:
 def _resolve_password() -> str:
     """Password for the connection.
 
-    Prefer a native Postgres role password (PGPASSWORD) -- the method used
-    here. If PGPASSWORD is unset, fall back to minting a short-lived OAuth
-    token via the Databricks SDK.
+    When running as a Databricks App with a postgres database resource,
+    credentials are automatically injected. Check DATABRICKS_POSTGRES_PASSWORD
+    first (from the database resource), then fall back to PGPASSWORD (native
+    role), then finally OAuth token generation.
     """
+    # Database resource provides DATABRICKS_POSTGRES_* variables
+    password = os.environ.get("DATABRICKS_POSTGRES_PASSWORD")
+    if password:
+        return password
+    
+    # Fallback to manual PGPASSWORD if set
     password = os.environ.get("PGPASSWORD")
     if password:
         return password
+    
+    # Last resort: generate OAuth token
     return _generate_password()
 
 
 @contextmanager
 def get_connection():
-    """Yield a psycopg2 connection built from the PG* env vars. TLS is
-    mandatory on Lakebase.
+    """Yield a psycopg2 connection built from env vars.
+    
+    Prioritizes DATABRICKS_POSTGRES_* variables (from database resource)
+    over PG* variables (manual configuration). TLS is mandatory on Lakebase.
     """
-    host = _require_env("PGHOST")
-    dbname = _require_env("PGDATABASE")
-    user = _require_env("PGUSER")
-    port = os.environ.get("PGPORT", "5432")
+    # Check database resource variables first, then fallback to manual PG* vars
+    host = os.environ.get("DATABRICKS_POSTGRES_HOST") or os.environ.get("PGHOST")
+    dbname = os.environ.get("DATABRICKS_POSTGRES_DATABASE") or os.environ.get("PGDATABASE")
+    user = os.environ.get("DATABRICKS_POSTGRES_USER") or os.environ.get("PGUSER")
+    port = os.environ.get("DATABRICKS_POSTGRES_PORT") or os.environ.get("PGPORT", "5432")
+    
+    if not host or not dbname or not user:
+        raise RuntimeError(
+            "Missing required database connection parameters. "
+            "Ensure DATABRICKS_POSTGRES_* variables are set (via database resource) "
+            "or set PG* variables manually in app.yaml."
+        )
+    
     password = _resolve_password()
 
     conn = psycopg2.connect(
