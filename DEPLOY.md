@@ -9,80 +9,73 @@ Steps that must happen in the Databricks UI or SQL editor are marked **(UI)** /
 
 ---
 
-## 0. Prerequisites (local, one time)
+## Authentication: native password role
 
-```bash
-# Databricks CLI (macOS)
-brew tap databricks/tap && brew install databricks
-databricks -v
+This app authenticates to Postgres with a **native role + password**
+(`student-weather`), not OAuth token minting. `lakebase.py` uses `PGPASSWORD`
+if it's set and only falls back to minting an OAuth token when it isn't — so
+the Databricks SDK/auth is not needed on the password path.
 
-# Authenticate to your workspace
-databricks auth login --host https://<your-workspace>.cloud.databricks.com
-```
+Connection values (already filled into [`app.yaml`](./app.yaml)):
+
+| Var | Value |
+|-----|-------|
+| `PGHOST` | `ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com` |
+| `PGDATABASE` | `databricks_postgres` |
+| `PGUSER` | `student-weather` |
+| `PGPORT` | `5432` / `PGSSLMODE` `require` |
+| `PGPASSWORD` | **from a secret** — never inline |
 
 ---
 
-## 1. Create the app (UI)
+## 0. Prerequisites (local, one time)
 
-1. **Compute → Apps → Create app**, pick the **Flask** template, name it
-   `weather-lakebase-rag`.
-2. Open the app's **Environment** tab and copy its **`DATABRICKS_CLIENT_ID`**
-   (a UUID). This is the app's service principal — it becomes the Postgres
-   username (`PGUSER`).
-
-## 2. Get the Lakebase connection values (UI)
-
-Your Lakebase project/branch/endpoint already exist. From the Lakebase project:
-
-- **Connect** modal → **Parameters only** → copy the **host**. Database is
-  `databricks_postgres`, port `5432`.
-- **Computes** tab → **Get ID** → confirm the endpoint resource name matches
-  `projects/weather-lakebase-rag/branches/production/endpoints/primary`.
-
-## 3. Grant the service principal Postgres access (SQL)
-
-In the Lakebase **SQL Editor**, run this once. Replace `<CLIENT_ID>` with the
-UUID from step 1. This enables OAuth login for the app and lets it read/write
-our tables.
-
-```sql
--- OAuth: let the app's service principal authenticate with a minted token
-CREATE EXTENSION IF NOT EXISTS databricks_auth;
-SELECT databricks_create_role('<CLIENT_ID>', 'service_principal');
-
-GRANT CONNECT ON DATABASE databricks_postgres TO "<CLIENT_ID>";
-GRANT USAGE, CREATE ON SCHEMA public TO "<CLIENT_ID>";
+```bash
+brew tap databricks/tap && brew install databricks   # macOS
+databricks auth login --host https://<your-workspace>.cloud.databricks.com
 ```
 
-## 4. Create the schema (SQL)
+## 1. Create the schema (SQL)
 
-Still in the SQL Editor, run the contents of [`schema.sql`](./schema.sql) as the
-**project owner** (needs rights to `CREATE EXTENSION vector`). It creates both
-tables and the HNSW index.
+Run [`schema.sql`](./schema.sql) in the Lakebase **SQL Editor** as the project
+owner (needs rights to `CREATE EXTENSION vector`). Creates both tables + the
+HNSW index. *(Already done for this project — the tables exist.)*
 
-Then grant the app access to the objects it created — the service principal
-needs table DML **and** `USAGE` on the `BIGSERIAL` sequence behind
-`weather_embeddings.id`:
+## 2. Grant the `student-weather` role access (SQL)
+
+The native role needs DML on both tables plus `USAGE` on the `BIGSERIAL`
+sequence. Run once as the table owner:
 
 ```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON weather_documents  TO "<CLIENT_ID>";
-GRANT SELECT, INSERT, UPDATE, DELETE ON weather_embeddings TO "<CLIENT_ID>";
-GRANT USAGE, SELECT ON SEQUENCE weather_embeddings_id_seq  TO "<CLIENT_ID>";
+GRANT CONNECT ON DATABASE databricks_postgres TO "student-weather";
+GRANT USAGE ON SCHEMA public TO "student-weather";
+GRANT SELECT, INSERT, UPDATE, DELETE ON weather_documents  TO "student-weather";
+GRANT SELECT, INSERT, UPDATE, DELETE ON weather_embeddings TO "student-weather";
+GRANT USAGE, SELECT ON SEQUENCE weather_embeddings_id_seq  TO "student-weather";
 ```
 
-## 5. Fill in `app.yaml`
+*(Verified working — a local run inserted 60 documents / 62 embeddings.)*
 
-Edit [`app.yaml`](./app.yaml) placeholders with the values from steps 1–2:
+## 3. Store the password as a Databricks secret
 
-- `PGHOST` → the Lakebase host
-- `PGUSER` → the app's `DATABRICKS_CLIENT_ID`
-- `PGDATABASE` (`databricks_postgres`), `PGPORT` (`5432`), `PGSSLMODE`
-  (`require`), and `ENDPOINT_NAME` are already set.
+The `PGPASSWORD` value in `app.yaml` is `valueFrom: "pg-password"`, which
+resolves to a **secret resource** on the app. Create the secret, then bind it
+to the app as a resource named `pg-password` (Apps UI → Edit → Resources →
+Secret → scope `weather`, key `pg-password`):
 
-The DB password is intentionally absent — `lakebase.py` mints a short-lived
-OAuth token per connection.
+```bash
+databricks secrets create-scope weather
+databricks secrets put-secret weather pg-password   # paste the role password
+```
 
-## 6. Deploy
+> Never commit the password. It lives only in the secret scope (deployed) or
+> your shell env (local).
+
+## 4. Deploy
+
+Create the app (Apps UI → Create app → Flask template, name
+`weather-lakebase-rag`), attach the `pg-password` secret resource from step 3,
+then:
 
 ```bash
 # Sync this repo into your workspace
@@ -101,7 +94,7 @@ curl https://<app-url>/health
 # {"weather_documents": 0, "weather_embeddings": 0}
 ```
 
-## 7. Run the pipeline (against the deployed app)
+## 5. Run the pipeline (against the deployed app)
 
 ```bash
 APP=https://<app-url>
@@ -137,7 +130,14 @@ curl -sX POST $APP/weather/search \
   `all-MiniLM-L6-v2` weights on first model use.
 - **Re-running is safe.** Sync upserts on `id`; embed skips documents that
   already have rows (`WHERE e.id IS NULL` + `ON CONFLICT DO NOTHING`).
-- **Local run alternative.** To run from your laptop instead: `databricks auth
-  login`, `export` the same `PG*` vars (using your email as `PGUSER` for local
-  testing) and `ENDPOINT_NAME`, `pip install -r requirements.txt`, then
-  `python scripts/ingest_weather_embeddings.py`.
+- **Local run alternative (no Databricks auth needed).** With the password
+  method you can populate the tables straight from your laptop:
+  ```bash
+  pip install -r requirements.txt
+  export PGHOST="ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
+  export PGDATABASE="databricks_postgres" PGUSER="student-weather" PGPORT="5432"
+  export PGPASSWORD="<the role password>"    # do NOT hard-code in a file
+  python scripts/ingest_weather_embeddings.py   # embed step
+  ```
+  (The sync + search steps run the same way via the endpoints, or Flask's
+  `app.test_client()`.)

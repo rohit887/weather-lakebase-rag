@@ -3,7 +3,6 @@ from contextlib import contextmanager
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from databricks.sdk import WorkspaceClient
 
 
 def _require_env(name: str) -> str:
@@ -12,9 +11,8 @@ def _require_env(name: str) -> str:
     if not value:
         raise RuntimeError(
             f"Required environment variable {name} is not set. "
-            "Databricks Apps injects the PG* variables only after the first "
-            "deploy with a Lakebase resource bound, and ENDPOINT_NAME must be "
-            "set in app.yaml."
+            "Set the PG* variables in app.yaml (or export them locally). "
+            "PGPASSWORD should come from a Databricks secret, never inline."
         )
     return value
 
@@ -22,11 +20,13 @@ def _require_env(name: str) -> str:
 def _generate_password() -> str:
     """Mint a fresh, short-lived OAuth database credential.
 
-    WorkspaceClient() takes no arguments: it reads auth from the environment
-    (the app's service principal when deployed, or your user account locally).
+    Only used as a FALLBACK when PGPASSWORD is not set. Imported lazily so
+    environments using a native password role don't need databricks-sdk.
     """
     endpoint_name = _require_env("ENDPOINT_NAME")
-    w = WorkspaceClient()
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient()  # reads auth from the environment; takes no arguments
     if not hasattr(w, "postgres"):
         raise RuntimeError(
             "The installed databricks-sdk has no `postgres` API. Pin "
@@ -36,16 +36,29 @@ def _generate_password() -> str:
     return credential.token
 
 
+def _resolve_password() -> str:
+    """Password for the connection.
+
+    Prefer a native Postgres role password (PGPASSWORD) -- the method used
+    here. If PGPASSWORD is unset, fall back to minting a short-lived OAuth
+    token via the Databricks SDK.
+    """
+    password = os.environ.get("PGPASSWORD")
+    if password:
+        return password
+    return _generate_password()
+
+
 @contextmanager
 def get_connection():
-    """Yield a psycopg2 connection built from injected PG* env vars plus a
-    freshly generated OAuth token. TLS is mandatory on Lakebase.
+    """Yield a psycopg2 connection built from the PG* env vars. TLS is
+    mandatory on Lakebase.
     """
     host = _require_env("PGHOST")
     dbname = _require_env("PGDATABASE")
     user = _require_env("PGUSER")
     port = os.environ.get("PGPORT", "5432")
-    password = _generate_password()
+    password = _resolve_password()
 
     conn = psycopg2.connect(
         host=host,

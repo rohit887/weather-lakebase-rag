@@ -1,18 +1,17 @@
 command: ["python", "app.py"]
 env:
-  # Lakebase connection. Get these from the Lakebase "Connect" modal
-  # (choose "Parameters only"). The password is NOT set here -- lakebase.py
-  # mints a short-lived OAuth token per connection via the Databricks SDK.
+  # --- Native Postgres role (password auth) ---
   - name: PGHOST
-    value: "<PASTE LAKEBASE HOST>"
+    value: "ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
   - name: PGDATABASE
     value: "databricks_postgres"
   - name: PGUSER
-    value: "<PASTE APP DATABRICKS_CLIENT_ID>"   # the app's service principal UUID
+    value: "student-weather"
   - name: PGPORT
     value: "5432"
   - name: PGSSLMODE
     value: "require"
-  # Endpoint resource name, from the branch's Computes tab -> "Get ID".
-  - name: ENDPOINT_NAME
-    value: "projects/weather-lakebase-rag/branches/production/endpoints/primary"
+  # Password is injected from a Databricks secret -- NEVER inline it here.
+  # `valueFrom` references an app "secret" resource (scope+key) named below.
+  - name: PGPASSWORD
+    valueFrom: "pg-password"
