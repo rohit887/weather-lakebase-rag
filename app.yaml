@@ -1,6 +1,11 @@
 command: ["python", "app.py"]
+
 env:
-  # --- Native Postgres role (password auth) ---
+  # --- OAuth token auth (via Databricks SDK fallback) ---
+  # The lakebase.py connection will mint short-lived OAuth tokens automatically
+  # when PGPASSWORD is not set. This uses the app's database resource.
+  - name: ENDPOINT_NAME
+    value: "ep-round-butterfly-d8iwgyc5"
   - name: PGHOST
     value: "ep-round-butterfly-d8iwgyc5.database.us-east-2.cloud.databricks.com"
   - name: PGDATABASE
@@ -11,7 +16,3 @@ env:
     value: "5432"
   - name: PGSSLMODE
     value: "require"
-  # Password is injected from a Databricks secret -- NEVER inline it here.
-  # `valueFrom` references an app "secret" resource (scope+key) named below.
-  - name: PGPASSWORD
-    valueFrom: "pg-password"

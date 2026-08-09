@@ -8,6 +8,8 @@ Endpoints:
   GET  /health         - row counts for both tables
 """
 
+import os
+
 from flask import Flask, jsonify, request
 from sentence_transformers import SentenceTransformer
 
