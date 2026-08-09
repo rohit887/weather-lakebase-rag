@@ -1,5 +1,7 @@
 # Weather RAG on Databricks Apps + Lakebase
 
+**GitHub repo:** https://github.com/rohit887/weather-lakebase-rag
+
 A small Flask app that does retrieval-augmented search over US weather data.
 Weather documents come from the National Weather Service, are embedded with a
 sentence-transformers model, and are stored in Lakebase (managed Postgres 17
